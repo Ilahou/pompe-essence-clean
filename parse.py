@@ -186,68 +186,70 @@ print("type de services disponibles : " + str(type_services))
 
 
 # Mise en BDD
+try:
+    os.makedirs("db", exist_ok=True)
 
-os.makedirs("db", exist_ok=True)
+    connexion = sqlite3.connect("db/PrixCarburants_instantane.db")
+    curseur = connexion.cursor()
 
-connexion = sqlite3.connect("db/PrixCarburants_instantane.db")
-curseur = connexion.cursor()
+    curseur.execute("DROP TABLE IF EXISTS stations")
+    curseur.execute("DROP TABLE IF EXISTS carburants")  
+    curseur.execute("DROP TABLE IF EXISTS services")
 
-curseur.execute("DROP TABLE IF EXISTS stations")
-curseur.execute("DROP TABLE IF EXISTS carburants")  
-curseur.execute("DROP TABLE IF EXISTS services")
+    curseur.execute("""CREATE TABLE stations (
+        id INTEGER PRIMARY KEY,
+        code_postal TEXT,
+        ville TEXT,
+        latitude REAL,
+        longitude REAL,
+        automate INTEGER
+                    )
+    """)
 
-curseur.execute("""CREATE TABLE stations (
-    id INTEGER PRIMARY KEY,
-    code_postal TEXT,
-    ville TEXT,
-    latitude REAL,
-    longitude REAL,
-    automate INTEGER
-                 )
-""")
+    curseur.execute("""CREATE TABLE carburants (
+                        station_id INTEGER REFERENCES stations(id), 
+                        carburant TEXT, 
+                        prix REAL )
+    """)
 
-curseur.execute("""CREATE TABLE carburants (
-                    station_id INTEGER REFERENCES stations(id), 
-                    carburant TEXT, 
-                    prix REAL )
-""")
+    curseur.execute("""CREATE TABLE services (
+                        station_id INTEGER REFERENCES stations(id), 
+                        service TEXT )
+                    
+    """)
 
-curseur.execute("""CREATE TABLE services (
-                    station_id INTEGER REFERENCES stations(id), 
-                    service TEXT )
-                
-""")
+    for station in stations:
+        id = station["id"]
+        ville = station["ville"]
+        code_postal = station["code_postal"]
+        latitude = station["latitude"]
+        longitude = station["longitude"]
+        automate = station["automate"]
 
-for station in stations:
-    id = station["id"]
-    ville = station["ville"]
-    code_postal = station["code_postal"]
-    latitude = station["latitude"]
-    longitude = station["longitude"]
-    automate = station["automate"]
-
-    curseur.execute(
-        "INSERT INTO stations (id, ville, code_postal, latitude, longitude, automate) VALUES (?, ?, ?, ?, ?, ?)",
-        (id, ville, code_postal, latitude, longitude, automate)
-    )
-
-    for carburant in station["carburants"]:
         curseur.execute(
-            "INSERT INTO carburants (station_id, carburant, prix) VALUES (?, ?, ?)",
-            (id, carburant, station["carburants"][carburant])
-        )
-    for service in station["services"]:
-        curseur.execute(
-            "INSERT INTO services (station_id, service) VALUES (?, ?)",
-            (id, service)
+            "INSERT INTO stations (id, ville, code_postal, latitude, longitude, automate) VALUES (?, ?, ?, ?, ?, ?)",
+            (id, ville, code_postal, latitude, longitude, automate)
         )
 
+        for carburant in station["carburants"]:
+            curseur.execute(
+                "INSERT INTO carburants (station_id, carburant, prix) VALUES (?, ?, ?)",
+                (id, carburant, station["carburants"][carburant])
+            )
+        for service in station["services"]:
+            curseur.execute(
+                "INSERT INTO services (station_id, service) VALUES (?, ?)",
+                (id, service)
+            )
 
-  
+
+    
 
 
 
 
-connexion.commit()
-connexion.close()
-print("Mise en base terminée, aucun doublon, tout est propre !")
+    connexion.commit()
+    connexion.close()
+    print("Mise en base terminée, aucun doublon, tout est propre !")
+except Exception as e:
+    print(f"Une erreur s'est produite lors de la mise en base de données : {e}")
