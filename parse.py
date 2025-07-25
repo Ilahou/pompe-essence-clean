@@ -242,8 +242,8 @@ def main():
             automate = int(station["automate"]) 
 
             curseur.execute(
-                "INSERT INTO stations (id, ville, code_postal, latitude, longitude, automate) VALUES (%s, %s, %s, %s, %s, %s)",
-                (id, ville, code_postal, latitude, longitude, automate)
+                "INSERT INTO stations (id, ville, code_postal, latitude, longitude, automate) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                (id, ville, code_postal, latitude, longitude, automate) 
             )
 
             for carburant in station["carburants"]:
