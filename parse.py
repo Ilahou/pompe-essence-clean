@@ -255,7 +255,7 @@ def main():
             for service in station["services"]:
                 curseur.execute(
                     "INSERT INTO services (station_id, service, date_import) VALUES (%s, %s,%s)",
-                    (id, service)
+                    (id, service, now)
                 )
 
 
