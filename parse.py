@@ -1,9 +1,11 @@
 import xml.etree.ElementTree as ET
-import sqlite3
+import psycopg2
 import os
+from datetime import datetime
 
 
 def main():
+    now = datetime.now()
     # Chemin du fichier XML
     xml_path = "data/actuel/PrixCarburants_instantane.xml"
 
@@ -189,34 +191,46 @@ def main():
 
     # Mise en BDD
     try:
-        os.makedirs("db", exist_ok=True)
+        # Récupération automatique des credentials Railway
+        DB_HOST = os.getenv("PGHOST")
+        DB_PORT = os.getenv("PGPORT")
+        DB_NAME = os.getenv("PGDATABASE")
+        DB_USER = os.getenv("PGUSER")
+        DB_PASS = os.getenv("PGPASSWORD")
 
-        connexion = sqlite3.connect("db/PrixCarburants_instantane.db")
-        curseur = connexion.cursor()
+        # Connexion à la base PostgreSQL
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASS
+        )  
 
-        curseur.execute("DROP TABLE IF EXISTS stations")
-        curseur.execute("DROP TABLE IF EXISTS carburants")  
-        curseur.execute("DROP TABLE IF EXISTS services")
+        curseur = conn.cursor() 
 
-        curseur.execute("""CREATE TABLE stations (
+        curseur.execute("""CREATE TABLE IF NOT EXISTS stations (
             id INTEGER PRIMARY KEY,
             code_postal TEXT,
             ville TEXT,
-            latitude REAL,
-            longitude REAL,
-            automate INTEGER
+            latitude DOUBLE PRECISION,
+            longitude DOUBLE PRECISION,
+            automate INTEGER,
+            date_import TIMESTAMP
                         )
         """)
 
-        curseur.execute("""CREATE TABLE carburants (
+        curseur.execute("""CREATE TABLE IF NOT EXISTS carburants (
                             station_id INTEGER REFERENCES stations(id), 
                             carburant TEXT, 
-                            prix REAL )
+                            prix DOUBLE PRECISION,
+                            date_import TIMESTAMP )
         """)
 
-        curseur.execute("""CREATE TABLE services (
+        curseur.execute("""CREATE TABLE IF NOT EXISTS services (
                             station_id INTEGER REFERENCES stations(id), 
-                            service TEXT )
+                            service TEXT,
+                            date_import TIMESTAMP )
                         
         """)
 
@@ -229,18 +243,18 @@ def main():
             automate = station["automate"]
 
             curseur.execute(
-                "INSERT INTO stations (id, ville, code_postal, latitude, longitude, automate) VALUES (?, ?, ?, ?, ?, ?)",
-                (id, ville, code_postal, latitude, longitude, automate)
+                "INSERT INTO stations (id, ville, code_postal, latitude, longitude, automate, date_import) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (id, ville, code_postal, latitude, longitude, automate, now)
             )
 
             for carburant in station["carburants"]:
                 curseur.execute(
-                    "INSERT INTO carburants (station_id, carburant, prix) VALUES (?, ?, ?)",
-                    (id, carburant, station["carburants"][carburant])
+                    "INSERT INTO carburants (station_id, carburant, prix, date_import) VALUES (%s, %s, %s, %s)",
+                    (id, carburant, station["carburants"][carburant], now)
                 )
             for service in station["services"]:
                 curseur.execute(
-                    "INSERT INTO services (station_id, service) VALUES (?, ?)",
+                    "INSERT INTO services (station_id, service, date_import) VALUES (%s, %s,%s)",
                     (id, service)
                 )
 
@@ -250,8 +264,8 @@ def main():
 
 
 
-        connexion.commit()
-        connexion.close()
+        conn.commit()
+        conn.close()
         print("Mise en base terminée, aucun doublon, tout est propre !")
     except Exception as e:
         print(f"Une erreur s'est produite lors de la mise en base de données : {e}")

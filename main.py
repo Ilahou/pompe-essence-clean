@@ -2,5 +2,9 @@
 import getxml
 import parse
 
-getxml.main()
-parse.main()
+def main():
+    getxml.main()
+    parse.main()
+
+if __name__ == "__main__":
+    main()
