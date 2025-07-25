@@ -215,8 +215,7 @@ def main():
             ville TEXT,
             latitude DOUBLE PRECISION,
             longitude DOUBLE PRECISION,
-            automate INTEGER,
-            date_import TIMESTAMP
+            automate INTEGER
                         )
         """)
 
@@ -243,8 +242,8 @@ def main():
             automate = int(station["automate"]) 
 
             curseur.execute(
-                "INSERT INTO stations (id, ville, code_postal, latitude, longitude, automate, date_import) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (id, ville, code_postal, latitude, longitude, automate, now)
+                "INSERT INTO stations (id, ville, code_postal, latitude, longitude, automate) VALUES (%s, %s, %s, %s, %s, %s)",
+                (id, ville, code_postal, latitude, longitude, automate)
             )
 
             for carburant in station["carburants"]:
@@ -254,7 +253,7 @@ def main():
                 )
             for service in station["services"]:
                 curseur.execute(
-                    "INSERT INTO services (station_id, service, date_import) VALUES (%s, %s,%s)",
+                    "INSERT INTO services (station_id, service, date_import) VALUES (%s, %s, %s)",
                     (id, service, now)
                 )
 
