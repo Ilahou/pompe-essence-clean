@@ -240,7 +240,7 @@ def main():
             code_postal = station["code_postal"]
             latitude = station["latitude"]
             longitude = station["longitude"]
-            automate = station["automate"]
+            automate = int(station["automate"]) 
 
             curseur.execute(
                 "INSERT INTO stations (id, ville, code_postal, latitude, longitude, automate, date_import) VALUES (%s, %s, %s, %s, %s, %s, %s)",
