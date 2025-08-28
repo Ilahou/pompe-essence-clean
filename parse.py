@@ -1,8 +1,12 @@
 import xml.etree.ElementTree as ET
 import psycopg2
 import os
+import re
 from datetime import datetime
 
+def _clean(txt: str) -> str:
+    # compacte les espaces/retours ligne
+    return re.sub(r'\s+', ' ', (txt or '').strip())
 
 def main():
     now = datetime.now()
@@ -25,6 +29,7 @@ def main():
             "latitude": float(pdv.get("latitude")) / 100000,
             "longitude": float(pdv.get("longitude")) / 100000,
             "ville": pdv.findtext("ville", default="").strip(),
+            "adresse": _clean(pdv.findtext("adresse", default="")),
             "automate": False,
             "services": [],
             "carburants": {}
@@ -59,6 +64,8 @@ def main():
         print(f"Automate24  : {station['automate']}")
         print(f"Services    : {station['services']}")
         print(f"Carburants  : {station['carburants']}")
+        print(f"Adresse    : {station['adresse']}")   # <-- AJOUT
+
         
     print(f"\nNombre total de stations : {len(stations)}")
 
@@ -209,11 +216,13 @@ def main():
         )  
 
         curseur = conn.cursor() 
+        curseur.execute("ALTER TABLE stations ADD COLUMN IF NOT EXISTS adresse TEXT;")
 
         curseur.execute("""CREATE TABLE IF NOT EXISTS stations (
             id INTEGER PRIMARY KEY,
             code_postal TEXT,
             ville TEXT,
+            adresse TEXT,
             latitude DOUBLE PRECISION,
             longitude DOUBLE PRECISION,
             automate INTEGER
@@ -239,12 +248,13 @@ def main():
             ville = station["ville"]
             code_postal = station["code_postal"]
             latitude = station["latitude"]
+            adresse = station["adresse"]
             longitude = station["longitude"]
             automate = int(station["automate"]) 
 
             curseur.execute(
-                "INSERT INTO stations (id, ville, code_postal, latitude, longitude, automate) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-                (id, ville, code_postal, latitude, longitude, automate) 
+                "INSERT INTO stations (id, ville, code_postal, adresse, latitude, longitude, automate) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                (id, ville, code_postal, adresse, latitude, longitude, automate) 
             )
 
             for carburant in station["carburants"]:
