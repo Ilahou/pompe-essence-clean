@@ -59,6 +59,7 @@ def main():
         print(f"Automate24  : {station['automate']}")
         print(f"Services    : {station['services']}")
         print(f"Carburants  : {station['carburants']}")
+        
     print(f"\nNombre total de stations : {len(stations)}")
 
     """
