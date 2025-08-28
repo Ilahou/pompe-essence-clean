@@ -2,3 +2,10 @@ data/
 db/
 no_need/
 
+.env
+.venv/
+__pycache__/
+*.pyc
+data/actuel/*.xml
+data/historique/*.xml
+*.csv
