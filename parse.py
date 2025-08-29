@@ -69,56 +69,6 @@ def main():
         
     print(f"\nNombre total de stations : {len(stations)}")
 
-    """
-    stations = []
-
-    for elem in root.iter('pdv'):
-        stations_dict = {}
-        stations_dict["id"] = elem.attrib.get("id")
-        stations_dict["code_postal" ] = elem.attrib.get("cp")
-        stations_dict["latitude"] = elem.attrib.get("latitude")
-        stations_dict["longitude"] = elem.attrib.get("longitude")
-
-        if elem.find("ville") is not None :
-            ville = elem.find("ville")
-            ville = ville.text
-            stations_dict["ville"] = ville
-
-        horaires = elem.find("horaires")
-        if horaires is not None:
-            automate = horaires.attrib.get("automate-24-24")
-            if automate == "1":
-                stations_dict["automate"] = True
-            elif automate == "":
-                stations_dict["automate"] = False
-            else:
-                stations_dict["automate"] = None
-
-            
-        
-        service_liste = []
-        for service in elem.findall("services/service"):
-            service_name = service.text
-            service_liste.append(service_name)
-            stations_dict["services"] = service_liste
-
-        carburant_liste = {}
-        for carburant in elem.findall("prix"):
-            carburant_name = carburant.attrib.get("nom")
-            carburant_prix = carburant.attrib.get("valeur")
-            carburant_liste[carburant_name] = carburant_prix
-            stations_dict["carburants"] = carburant_liste
-
-
-        stations.append(stations_dict)
-    print(stations)
-    """
-
-        
-
-
-
-
 
     # analyse statistique du document
     total_stations = 0
@@ -215,9 +165,13 @@ def main():
             password=DB_PASS
         )  
 
+        # Création des tables si elles n'existent pas
+         # Ajout de la colonne adresse si elle n'existe pas
         curseur = conn.cursor() 
         curseur.execute("ALTER TABLE stations ADD COLUMN IF NOT EXISTS adresse TEXT;")
 
+
+        # Création des tables si elles n'existent pas
         curseur.execute("""CREATE TABLE IF NOT EXISTS stations (
             id INTEGER PRIMARY KEY,
             code_postal TEXT,
@@ -229,6 +183,7 @@ def main():
                         )
         """)
 
+        # Table carburants avec référence à stations.id
         curseur.execute("""CREATE TABLE IF NOT EXISTS carburants (
                             station_id INTEGER REFERENCES stations(id), 
                             carburant TEXT, 
@@ -236,6 +191,7 @@ def main():
                             date_import TIMESTAMP )
         """)
 
+        # Table services avec référence à stations.id
         curseur.execute("""CREATE TABLE IF NOT EXISTS services (
                             station_id INTEGER REFERENCES stations(id), 
                             service TEXT,
@@ -243,6 +199,7 @@ def main():
                         
         """)
 
+        # Insertion des données
         for station in stations:
             id = station["id"]
             ville = station["ville"]
@@ -252,19 +209,42 @@ def main():
             longitude = station["longitude"]
             automate = int(station["automate"]) 
 
+            # Insertion de la station
             curseur.execute(
-                "INSERT INTO stations (id, ville, code_postal, adresse, latitude, longitude, automate) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                """INSERT INTO stations (
+                    id, ville, code_postal, adresse, latitude, longitude, automate) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s) 
+                    ON CONFLICT (id) DO UPDATE SET 
+                        ville = EXCLUDED.ville, 
+                        code_postal = EXCLUDED.code_postal, 
+                        adresse = EXCLUDED.adresse, 
+                        latitude = EXCLUDED.latitude, 
+                        longitude = EXCLUDED.longitude, 
+                        automate = EXCLUDED.automate
+                        """,
                 (id, ville, code_postal, adresse, latitude, longitude, automate) 
             )
-
+            # Insertion des carburants et services
             for carburant in station["carburants"]:
                 curseur.execute(
-                    "INSERT INTO carburants (station_id, carburant, prix, date_import) VALUES (%s, %s, %s, %s)",
+                    """INSERT INTO carburants (
+                        station_id, 
+                        carburant, 
+                        prix, 
+                        date_import) 
+                        VALUES (%s, %s, %s, %s)
+                        """,
                     (id, carburant, station["carburants"][carburant], now)
                 )
+            
             for service in station["services"]:
                 curseur.execute(
-                    "INSERT INTO services (station_id, service, date_import) VALUES (%s, %s, %s)",
+                    """INSERT INTO services (
+                        station_id, 
+                        service, 
+                        date_import) 
+                        VALUES (%s, %s, %s)
+                        """,
                     (id, service, now)
                 )
 
