@@ -1,51 +1,62 @@
+# parse.py
 import xml.etree.ElementTree as ET
 import psycopg2
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone, date
+from pathlib import Path
 
 def _clean(txt: str) -> str:
-    # compacte les espaces/retours ligne
     return re.sub(r'\s+', ' ', (txt or '').strip())
 
 def main():
-    now = datetime.now()
-    # Chemin du fichier XML
-    xml_path = "data/actuel/PrixCarburants_instantane.xml"
+    now_utc = datetime.now(timezone.utc)
+    today = now_utc.date()
 
-    # Lecture + décodage CP1252
-    tree = ET.parse(xml_path)
+    # --- Résolution de chemin robuste (cron-proof)
+    BASE_DIR = Path(__file__).resolve().parent
+    XML_PATH = Path(os.getenv("XML_PATH", BASE_DIR / "data/actuel/PrixCarburants_instantane.xml"))
+
+    if not XML_PATH.exists():
+        raise FileNotFoundError(
+            f"XML introuvable: {XML_PATH} (cwd={Path.cwd()}). "
+            "Assure-toi que getxml écrit bien à cet emplacement ou passe XML_PATH dans l'env."
+        )
+
+    # Log de contrôle
+    try:
+        mtime = datetime.fromtimestamp(XML_PATH.stat().st_mtime, tz=timezone.utc)
+        print(f"[parse] XML: {XML_PATH}")
+        print(f"[parse] XML mtime (UTC): {mtime.isoformat()}")
+    except Exception:
+        pass
+
+    # --- Parsing XML
+    tree = ET.parse(str(XML_PATH))
     root = tree.getroot()
 
     stations = []
-
-
-    # Parcours de l'arbre XML
-
     for pdv in root.findall("pdv"):
         station = {
             "id": int(pdv.get("id")),
             "code_postal": pdv.get("cp"),
             "latitude": float(pdv.get("latitude")) / 100000,
             "longitude": float(pdv.get("longitude")) / 100000,
-            "ville": pdv.findtext("ville", default="").strip(),
+            "ville": (pdv.findtext("ville", default="") or "").strip(),
             "adresse": _clean(pdv.findtext("adresse", default="")),
             "automate": False,
             "services": [],
-            "carburants": {}
+            "carburants": {},
         }
 
-        # Automate 24/24
         horaires = pdv.find("horaires")
         if horaires is not None:
             station["automate"] = (horaires.get("automate-24-24") == "1")
 
-        # Services
         station["services"] = [
             s.text.strip() for s in pdv.findall("services/service") if s.text
         ]
 
-        # Carburants
         for prix in pdv.findall("prix"):
             nom = prix.get("nom")
             val = prix.get("valeur")
@@ -54,212 +65,125 @@ def main():
 
         stations.append(station)
 
-    # Affichage lisible des 5 premières stations
-    for station in stations[:5]:
-        print("-" * 40)
-        print(f"ID          : {station['id']}")
-        print(f"Ville       : {station['ville']}")
-        print(f"CP          : {station['code_postal']}")
-        print(f"Coords      : {station['latitude']}, {station['longitude']}")
-        print(f"Automate24  : {station['automate']}")
-        print(f"Services    : {station['services']}")
-        print(f"Carburants  : {station['carburants']}")
-        print(f"Adresse    : {station['adresse']}")   # <-- AJOUT
+    print(f"[parse] Stations parsées: {len(stations)}")
 
-        
-    print(f"\nNombre total de stations : {len(stations)}")
-
-
-    # analyse statistique du document
-    total_stations = 0
-    stations_avec_services = 0
-    stations_avec_horaires = 0
-    stations_avec_automate = 0
-    stations_avec_detail_horaire_jour = 0
-    stations_avec_SP98 = 0
-    stations_avec_SP95 = 0
-    stations_avec_gazole = 0
-    stations_avec_E10 = 0
-    stations_avec_E85 = 0
-    stations_avec_GPLc = 0
-
-
-    for pdv in root.iter("pdv"):
-        total_stations += 1
-        if pdv.find("services") is not None:
-            stations_avec_services += 1
-        if pdv.find("horaires") is not None:
-            stations_avec_horaires += 1
-        for horaires in pdv.iter("horaires"):
-            if horaires.attrib.get("automate-24-24") == "1":
-                stations_avec_automate += 1
-            for jour in horaires.findall("jour"):
-                if jour.find("horaire") is not None:
-                    stations_avec_detail_horaire_jour += 1
-                    break
-        for carburant in pdv.iter("prix"):
-            if carburant.attrib.get("nom") == "SP98":
-                stations_avec_SP98 += 1
-            elif carburant.attrib.get("nom") == "SP95":
-                stations_avec_SP95 += 1
-            elif carburant.attrib.get("nom") == "Gazole":
-                stations_avec_gazole += 1
-            elif carburant.attrib.get("nom") == "E10":
-                stations_avec_E10 += 1 
-            elif carburant.attrib.get("nom") == "E85":
-                stations_avec_E85 += 1
-            elif carburant.attrib.get("nom") == "GPLc":
-                stations_avec_GPLc += 1
-        
-
-    type_carburant = []
-
-    for pdv in root.findall("pdv"):
-        for carburant in pdv.findall("prix"):
-            nom = carburant.attrib.get("nom")
-            if nom not in type_carburant:
-                type_carburant.append(nom)
-
-    type_services = []
-
-    for pdv in root.findall("pdv"):
-        for services in pdv.findall("services"):
-            for service in services.findall("service"):
-                nom_service = service.text
-                if nom_service not in type_services:
-                    type_services.append(nom_service)
-
-
-    print(f"Total de stations : {total_stations}")
-    print(f"Total de stations avec services : {stations_avec_services}")
-    print(f"Total de stations avec horaires : {stations_avec_horaires}")
-    print(f"Total de stations avec automate 24/24 : {stations_avec_automate}")
-    print(f"Total de stations avec horaire par jour : {stations_avec_detail_horaire_jour}")
-    print(f"Total de stations avec SP98 : {stations_avec_SP98}")
-    print(f"Total de stations avec SP95 : {stations_avec_SP95}")
-    print(f"Total de stations avec Gazole : {stations_avec_gazole}")
-    print(f"Total de stations avec E10 : {stations_avec_E10}")
-    print(f"Total de stations avec E85 : {stations_avec_E85}")
-    print(f"Total de stations avec GPLc : {stations_avec_GPLc}")
-    print()
-    print("type de carburant disponibles : " + str(type_carburant))
-    print()
-    print("type de services disponibles : " + str(type_services))
-
-
-    # Mise en BDD
+    # --- Connexion BDD (Railway: PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD)
     try:
-        # Récupération automatique des credentials Railway
         DB_HOST = os.getenv("PGHOST")
         DB_PORT = os.getenv("PGPORT")
         DB_NAME = os.getenv("PGDATABASE")
         DB_USER = os.getenv("PGUSER")
         DB_PASS = os.getenv("PGPASSWORD")
 
-        # Connexion à la base PostgreSQL
         conn = psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASS
-        )  
+            host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS
+        )
+        cur = conn.cursor()
 
-        # Création des tables si elles n'existent pas
-         # Ajout de la colonne adresse si elle n'existe pas
-        curseur = conn.cursor() 
-        curseur.execute("ALTER TABLE stations ADD COLUMN IF NOT EXISTS adresse TEXT;")
-
-
-        # Création des tables si elles n'existent pas
-        curseur.execute("""CREATE TABLE IF NOT EXISTS stations (
-            id INTEGER PRIMARY KEY,
-            code_postal TEXT,
-            ville TEXT,
-            adresse TEXT,
-            latitude DOUBLE PRECISION,
-            longitude DOUBLE PRECISION,
-            automate INTEGER
-                        )
-        """)
-
-        # Table carburants avec référence à stations.id
-        curseur.execute("""CREATE TABLE IF NOT EXISTS carburants (
-                            station_id INTEGER REFERENCES stations(id), 
-                            carburant TEXT, 
-                            prix DOUBLE PRECISION,
-                            date_import TIMESTAMP )
-        """)
-
-        # Table services avec référence à stations.id
-        curseur.execute("""CREATE TABLE IF NOT EXISTS services (
-                            station_id INTEGER REFERENCES stations(id), 
-                            service TEXT,
-                            date_import TIMESTAMP )
-                        
-        """)
-
-        # Insertion des données
-        for station in stations:
-            id = station["id"]
-            ville = station["ville"]
-            code_postal = station["code_postal"]
-            latitude = station["latitude"]
-            adresse = station["adresse"]
-            longitude = station["longitude"]
-            automate = int(station["automate"]) 
-
-            # Insertion de la station
-            curseur.execute(
-                """INSERT INTO stations (
-                    id, ville, code_postal, adresse, latitude, longitude, automate) 
-                    VALUES (%s, %s, %s, %s, %s, %s, %s) 
-                    ON CONFLICT (id) DO UPDATE SET 
-                        ville = EXCLUDED.ville, 
-                        code_postal = EXCLUDED.code_postal, 
-                        adresse = EXCLUDED.adresse, 
-                        latitude = EXCLUDED.latitude, 
-                        longitude = EXCLUDED.longitude, 
-                        automate = EXCLUDED.automate
-                        """,
-                (id, ville, code_postal, adresse, latitude, longitude, automate) 
+        # --- DDL (CREATE d'abord, puis ALTER) — idempotent
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS stations (
+              id INTEGER PRIMARY KEY,
+              code_postal TEXT,
+              ville TEXT,
+              adresse TEXT,
+              latitude DOUBLE PRECISION,
+              longitude DOUBLE PRECISION,
+              automate INTEGER
             )
-            # Insertion des carburants et services
-            for carburant in station["carburants"]:
-                curseur.execute(
-                    """INSERT INTO carburants (
-                        station_id, 
-                        carburant, 
-                        prix, 
-                        date_import) 
-                        VALUES (%s, %s, %s, %s)
-                        """,
-                    (id, carburant, station["carburants"][carburant], now)
+        """)
+        # Si table existante sans 'adresse'
+        cur.execute("ALTER TABLE stations ADD COLUMN IF NOT EXISTS adresse TEXT")
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS carburants (
+              station_id INTEGER REFERENCES stations(id),
+              carburant  TEXT,
+              prix       DOUBLE PRECISION,
+              date_import TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS services (
+              station_id INTEGER REFERENCES stations(id),
+              service    TEXT,
+              date_import TIMESTAMP
+            )
+        """)
+
+        # Index utiles (idempotents)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station ON carburants(station_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_date ON carburants(date_import)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station_carb ON carburants(station_id, carburant)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_services_station ON services(station_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_services_date ON services(date_import)")
+
+        # --- Upsert stations + dédup au jour pour carburants/services
+        for st in stations:
+            sid = st["id"]
+            ville = st["ville"]
+            cp = st["code_postal"]
+            lat = st["latitude"]
+            lon = st["longitude"]
+            adr = st["adresse"]
+            auto = int(st["automate"])
+
+            # Upsert station
+            cur.execute(
+                """
+                INSERT INTO stations (id, ville, code_postal, adresse, latitude, longitude, automate)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                  ville = EXCLUDED.ville,
+                  code_postal = EXCLUDED.code_postal,
+                  adresse = EXCLUDED.adresse,
+                  latitude = EXCLUDED.latitude,
+                  longitude = EXCLUDED.longitude,
+                  automate = EXCLUDED.automate
+                """,
+                (sid, ville, cp, adr, lat, lon, auto)
+            )
+
+            # Carburants : 1 ligne max par (jour, station, carburant)
+            for carb, price in st["carburants"].items():
+                cur.execute(
+                    "DELETE FROM carburants WHERE station_id=%s AND carburant=%s AND date_import::date=%s",
+                    (sid, carb, today)
                 )
-            
-            for service in station["services"]:
-                curseur.execute(
-                    """INSERT INTO services (
-                        station_id, 
-                        service, 
-                        date_import) 
-                        VALUES (%s, %s, %s)
-                        """,
-                    (id, service, now)
+                cur.execute(
+                    "INSERT INTO carburants (station_id, carburant, prix, date_import) VALUES (%s, %s, %s, %s)",
+                    (sid, carb, price, now_utc.replace(tzinfo=None))  # on reste en TIMESTAMP sans TZ
                 )
 
+            # Services : idem (si tu veux un historique quotidien)
+            for svc in st["services"]:
+                cur.execute(
+                    "DELETE FROM services WHERE station_id=%s AND service=%s AND date_import::date=%s",
+                    (sid, svc, today)
+                )
+                cur.execute(
+                    "INSERT INTO services (station_id, service, date_import) VALUES (%s, %s, %s)",
+                    (sid, svc, now_utc.replace(tzinfo=None))
+                )
 
-        
-
-
-
+        # --- Métriques de fin d'import
+        cur.execute("""
+            SELECT
+              CURRENT_DATE                                  AS today,
+              MAX(date_import)                               AS last_import_ts,
+              COUNT(*) FILTER (WHERE date_import::date=CURRENT_DATE) AS rows_today,
+              COUNT(DISTINCT station_id) FILTER (WHERE date_import::date=CURRENT_DATE) AS stations_today
+            FROM carburants
+        """)
+        today_row = cur.fetchone()
+        print(f"[parse] Contrôle carburants: {today_row}")
 
         conn.commit()
         conn.close()
-        print("Mise en base terminée, aucun doublon, tout est propre !")
+        print("[parse] OK: mise en base terminée (dédup jour), logs ci-dessus.")
     except Exception as e:
-        print(f"Une erreur s'est produite lors de la mise en base de données : {e}")
+        print(f"[parse] ERREUR BDD: {e}")
+        raise
 
-# ⬇️ Ce bloc permet d'exécuter getxml.py tout seul (terminal) OU en import
 if __name__ == "__main__":
     main()
