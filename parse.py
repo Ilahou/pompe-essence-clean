@@ -44,6 +44,7 @@ def main():
     station_rows = []
     carburant_rows = []
     service_rows = []
+    missing_maj = 0
     for pdv in root.findall("pdv"):
         station = {
             "id": int(pdv.get("id")),
@@ -69,7 +70,16 @@ def main():
             nom = prix.get("nom")
             val = prix.get("valeur")
             if nom and val:
-                station["carburants"][nom] = float(val.replace(",", "."))
+                maj_dt = None
+                maj_str = prix.get("maj")
+                if maj_str:
+                    try:
+                        maj_dt = datetime.strptime(maj_str, "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        maj_dt = None
+                if maj_dt is None:
+                    missing_maj += 1
+                station["carburants"][nom] = {"price": float(val.replace(",", ".")), "maj": maj_dt}
 
         stations.append(station)
         station_rows.append(
@@ -83,12 +93,14 @@ def main():
                 int(station["automate"]),
             )
         )
-        for carb, price in station["carburants"].items():
-            carburant_rows.append((station["id"], carb, price, now_naive))
+        for carb, info in station["carburants"].items():
+            maj_dt = info.get("maj") or now_naive
+            carburant_rows.append((station["id"], carb, info["price"], now_naive, maj_dt))
         for svc in station["services"]:
             service_rows.append((station["id"], svc, now_naive))
 
     print(f"[parse] Stations parsées: {len(stations)}")
+    print(f"[parse] Carburants sans date_maj fiable: {missing_maj}")
 
     # --- Connexion BDD (Railway: PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD)
     try:
@@ -123,9 +135,11 @@ def main():
               station_id INTEGER REFERENCES stations(id),
               carburant  TEXT,
               prix       DOUBLE PRECISION,
-              date_import TIMESTAMP
+              date_import TIMESTAMP,
+              date_maj   TIMESTAMP
             )
         """)
+        cur.execute("ALTER TABLE carburants ADD COLUMN IF NOT EXISTS date_maj TIMESTAMP")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS services (
               station_id INTEGER REFERENCES stations(id),
@@ -173,7 +187,7 @@ def main():
         if carburant_rows:
             execute_values(
                 cur,
-                "INSERT INTO carburants (station_id, carburant, prix, date_import) VALUES %s",
+                "INSERT INTO carburants (station_id, carburant, prix, date_import, date_maj) VALUES %s",
                 carburant_rows,
                 page_size=5000,
             )
