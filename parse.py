@@ -1,9 +1,10 @@
 # parse.py
 import xml.etree.ElementTree as ET
 import psycopg2
+from psycopg2.extras import execute_batch, execute_values
 import os
 import re
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
 
 def _clean(txt: str) -> str:
@@ -12,6 +13,9 @@ def _clean(txt: str) -> str:
 def main():
     now_utc = datetime.now(timezone.utc)
     today = now_utc.date()
+    day_start = datetime(today.year, today.month, today.day)
+    day_end = day_start + timedelta(days=1)
+    now_naive = now_utc.replace(tzinfo=None)
 
     # --- Résolution de chemin robuste (cron-proof)
     BASE_DIR = Path(__file__).resolve().parent
@@ -36,6 +40,9 @@ def main():
     root = tree.getroot()
 
     stations = []
+    station_rows = []
+    carburant_rows = []
+    service_rows = []
     for pdv in root.findall("pdv"):
         station = {
             "id": int(pdv.get("id")),
@@ -64,6 +71,21 @@ def main():
                 station["carburants"][nom] = float(val.replace(",", "."))
 
         stations.append(station)
+        station_rows.append(
+            (
+                station["id"],
+                station["ville"],
+                station["code_postal"],
+                station["adresse"],
+                station["latitude"],
+                station["longitude"],
+                int(station["automate"]),
+            )
+        )
+        for carb, price in station["carburants"].items():
+            carburant_rows.append((station["id"], carb, price, now_naive))
+        for svc in station["services"]:
+            service_rows.append((station["id"], svc, now_naive))
 
     print(f"[parse] Stations parsées: {len(stations)}")
 
@@ -118,18 +140,20 @@ def main():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_station ON services(station_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_date ON services(date_import)")
 
-        # --- Upsert stations + dédup au jour pour carburants/services
-        for st in stations:
-            sid = st["id"]
-            ville = st["ville"]
-            cp = st["code_postal"]
-            lat = st["latitude"]
-            lon = st["longitude"]
-            adr = st["adresse"]
-            auto = int(st["automate"])
+        # Purge du jour en bloc pour éviter les DELETE/INSERT répétitifs et garder un import par jour
+        cur.execute(
+            "DELETE FROM carburants WHERE date_import >= %s AND date_import < %s",
+            (day_start, day_end)
+        )
+        cur.execute(
+            "DELETE FROM services WHERE date_import >= %s AND date_import < %s",
+            (day_start, day_end)
+        )
 
-            # Upsert station
-            cur.execute(
+        # --- Upsert stations + dédup au jour pour carburants/services
+        if station_rows:
+            execute_batch(
+                cur,
                 """
                 INSERT INTO stations (id, ville, code_postal, adresse, latitude, longitude, automate)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -141,30 +165,25 @@ def main():
                   longitude = EXCLUDED.longitude,
                   automate = EXCLUDED.automate
                 """,
-                (sid, ville, cp, adr, lat, lon, auto)
+                station_rows,
+                page_size=500,
             )
 
-            # Carburants : 1 ligne max par (jour, station, carburant)
-            for carb, price in st["carburants"].items():
-                cur.execute(
-                    "DELETE FROM carburants WHERE station_id=%s AND carburant=%s AND date_import::date=%s",
-                    (sid, carb, today)
-                )
-                cur.execute(
-                    "INSERT INTO carburants (station_id, carburant, prix, date_import) VALUES (%s, %s, %s, %s)",
-                    (sid, carb, price, now_utc.replace(tzinfo=None))  # on reste en TIMESTAMP sans TZ
-                )
+        if carburant_rows:
+            execute_values(
+                cur,
+                "INSERT INTO carburants (station_id, carburant, prix, date_import) VALUES %s",
+                carburant_rows,
+                page_size=5000,
+            )
 
-            # Services : idem (si tu veux un historique quotidien)
-            for svc in st["services"]:
-                cur.execute(
-                    "DELETE FROM services WHERE station_id=%s AND service=%s AND date_import::date=%s",
-                    (sid, svc, today)
-                )
-                cur.execute(
-                    "INSERT INTO services (station_id, service, date_import) VALUES (%s, %s, %s)",
-                    (sid, svc, now_utc.replace(tzinfo=None))
-                )
+        if service_rows:
+            execute_values(
+                cur,
+                "INSERT INTO services (station_id, service, date_import) VALUES %s",
+                service_rows,
+                page_size=5000,
+            )
 
         # --- Métriques de fin d'import
         cur.execute("""
