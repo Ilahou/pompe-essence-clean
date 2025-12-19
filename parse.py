@@ -8,6 +8,7 @@ from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
 
 def _clean(txt: str) -> str:
+    # Nettoie basiquement les textes XML pour éliminer les espaces multiples.
     return re.sub(r'\s+', ' ', (txt or '').strip())
 
 def main():
