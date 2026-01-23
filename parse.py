@@ -43,6 +43,7 @@ def main():
     stations = []
     station_rows = []
     carburant_rows = []
+    carburant_current_rows = []
     service_rows = []
     missing_maj = 0
     for pdv in root.findall("pdv"):
@@ -96,6 +97,8 @@ def main():
         for carb, info in station["carburants"].items():
             maj_dt = info.get("maj") or now_naive
             carburant_rows.append((station["id"], carb, info["price"], now_naive, maj_dt))
+            prix_milli = int(round(info["price"] * 1000))
+            carburant_current_rows.append((station["id"], carb, prix_milli, maj_dt))
         for svc in station["services"]:
             service_rows.append((station["id"], svc, now_naive))
 
@@ -147,6 +150,15 @@ def main():
               date_import TIMESTAMP
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS carburant_current (
+              station_id INTEGER NOT NULL,
+              carburant  TEXT NOT NULL,
+              prix_milli INTEGER NOT NULL,
+              ts TIMESTAMP NOT NULL,
+              PRIMARY KEY (station_id, carburant)
+            )
+        """)
 
         # Index utiles (idempotents)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station ON carburants(station_id)")
@@ -154,14 +166,11 @@ def main():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station_carb ON carburants(station_id, carburant)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_station ON services(station_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_date ON services(date_import)")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_services_station_service ON services(station_id, service)")
 
         # Purge du jour en bloc pour éviter les DELETE/INSERT répétitifs et garder un import par jour
         cur.execute(
             "DELETE FROM carburants WHERE date_import >= %s AND date_import < %s",
-            (day_start, day_end)
-        )
-        cur.execute(
-            "DELETE FROM services WHERE date_import >= %s AND date_import < %s",
             (day_start, day_end)
         )
 
@@ -192,10 +201,28 @@ def main():
                 page_size=5000,
             )
 
+        if carburant_current_rows:
+            execute_values(
+                cur,
+                """
+                INSERT INTO carburant_current (station_id, carburant, prix_milli, ts) VALUES %s
+                ON CONFLICT (station_id, carburant) DO UPDATE SET
+                  prix_milli = EXCLUDED.prix_milli,
+                  ts = EXCLUDED.ts
+                WHERE EXCLUDED.ts >= carburant_current.ts
+                """,
+                carburant_current_rows,
+                page_size=5000,
+            )
+
         if service_rows:
             execute_values(
                 cur,
-                "INSERT INTO services (station_id, service, date_import) VALUES %s",
+                """
+                INSERT INTO services (station_id, service, date_import) VALUES %s
+                ON CONFLICT (station_id, service) DO UPDATE SET
+                  date_import = EXCLUDED.date_import
+                """,
                 service_rows,
                 page_size=5000,
             )
@@ -211,6 +238,21 @@ def main():
         """)
         today_row = cur.fetchone()
         print(f"[parse] Contrôle carburants: {today_row}")
+
+        # Purge courte durée: 30 jours max, mais seulement si la table n'est pas trop grosse
+        cur.execute("SELECT COUNT(*) FROM carburants")
+        total_carburants = cur.fetchone()[0] or 0
+        if total_carburants <= 1_000_000:
+            cur.execute("""
+                DELETE FROM carburants
+                WHERE COALESCE(date_maj, date_import) < NOW() - INTERVAL '30 days'
+            """)
+            print(f"[parse] Purge carburants 30j OK (total avant={total_carburants})")
+        else:
+            print(
+                f"[parse] Purge carburants SKIP (total={total_carburants} > 1_000_000). "
+                "Utilise une purge progressive par batch."
+            )
 
         conn.commit()
         conn.close()
