@@ -95,6 +95,23 @@ def main():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station_carb ON carburants(station_id, carburant)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_station ON services(station_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_date ON services(date_import)")
+        # Dédup carburants avant création d'index unique (évite crash si doublons historiques)
+        print("Vérification doublons carburants...")
+        cur.execute("""
+            WITH ranked AS (
+              SELECT ctid,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY station_id, carburant, (COALESCE(date_maj, date_import)::date)
+                       ORDER BY date_maj DESC NULLS LAST, date_import DESC, ctid DESC
+                     ) AS rn
+              FROM carburants
+            )
+            DELETE FROM carburants
+            WHERE ctid IN (SELECT ctid FROM ranked WHERE rn > 1)
+        """)
+        deleted = cur.rowcount
+        if deleted > 0:
+            print(f"Doublons carburants supprimés: {deleted}")
         cur.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_carburants_station_fuel_day
             ON carburants(station_id, carburant, (COALESCE(date_maj, date_import)::date))
