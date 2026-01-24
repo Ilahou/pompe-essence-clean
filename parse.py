@@ -166,6 +166,19 @@ def main():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station_carb ON carburants(station_id, carburant)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_station ON services(station_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_date ON services(date_import)")
+        # Dédup avant d'imposer l'unicité (évite crash si doublons historiques)
+        cur.execute("""
+            WITH ranked AS (
+              SELECT ctid,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY station_id, service
+                       ORDER BY date_import DESC NULLS LAST, ctid DESC
+                     ) AS rn
+              FROM services
+            )
+            DELETE FROM services
+            WHERE ctid IN (SELECT ctid FROM ranked WHERE rn > 1)
+        """)
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_services_station_service ON services(station_id, service)")
 
         # Purge du jour en bloc pour éviter les DELETE/INSERT répétitifs et garder un import par jour
