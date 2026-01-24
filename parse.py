@@ -4,7 +4,7 @@ import psycopg2
 from psycopg2.extras import execute_batch, execute_values
 import os
 import re
-from datetime import datetime, timezone, date, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 def _clean(txt: str) -> str:
@@ -12,10 +12,8 @@ def _clean(txt: str) -> str:
     return re.sub(r'\s+', ' ', (txt or '').strip())
 
 def main():
+    print("Début parsing...")
     now_utc = datetime.now(timezone.utc)
-    today = now_utc.date()
-    day_start = datetime(today.year, today.month, today.day)
-    day_end = day_start + timedelta(days=1)
     now_naive = now_utc.replace(tzinfo=None)
 
     # --- Résolution de chemin robuste (cron-proof)
@@ -35,75 +33,6 @@ def main():
         print(f"[parse] XML mtime (UTC): {mtime.isoformat()}")
     except Exception:
         pass
-
-    # --- Parsing XML
-    tree = ET.parse(str(XML_PATH))
-    root = tree.getroot()
-
-    stations = []
-    station_rows = []
-    carburant_rows = []
-    carburant_current_rows = []
-    service_rows = []
-    missing_maj = 0
-    for pdv in root.findall("pdv"):
-        station = {
-            "id": int(pdv.get("id")),
-            "code_postal": pdv.get("cp"),
-            "latitude": float(pdv.get("latitude")) / 100000,
-            "longitude": float(pdv.get("longitude")) / 100000,
-            "ville": (pdv.findtext("ville", default="") or "").strip(),
-            "adresse": _clean(pdv.findtext("adresse", default="")),
-            "automate": False,
-            "services": [],
-            "carburants": {},
-        }
-
-        horaires = pdv.find("horaires")
-        if horaires is not None:
-            station["automate"] = (horaires.get("automate-24-24") == "1")
-
-        station["services"] = [
-            s.text.strip() for s in pdv.findall("services/service") if s.text
-        ]
-
-        for prix in pdv.findall("prix"):
-            nom = prix.get("nom")
-            val = prix.get("valeur")
-            if nom and val:
-                maj_dt = None
-                maj_str = prix.get("maj")
-                if maj_str:
-                    try:
-                        maj_dt = datetime.strptime(maj_str, "%Y-%m-%d %H:%M:%S")
-                    except ValueError:
-                        maj_dt = None
-                if maj_dt is None:
-                    missing_maj += 1
-                station["carburants"][nom] = {"price": float(val.replace(",", ".")), "maj": maj_dt}
-
-        stations.append(station)
-        station_rows.append(
-            (
-                station["id"],
-                station["ville"],
-                station["code_postal"],
-                station["adresse"],
-                station["latitude"],
-                station["longitude"],
-                int(station["automate"]),
-            )
-        )
-        for carb, info in station["carburants"].items():
-            maj_dt = info.get("maj") or now_naive
-            carburant_rows.append((station["id"], carb, info["price"], now_naive, maj_dt))
-            prix_milli = int(round(info["price"] * 1000))
-            carburant_current_rows.append((station["id"], carb, prix_milli, maj_dt))
-        for svc in station["services"]:
-            service_rows.append((station["id"], svc, now_naive))
-
-    print(f"[parse] Stations parsées: {len(stations)}")
-    print(f"[parse] Carburants sans date_maj fiable: {missing_maj}")
 
     # --- Connexion BDD (Railway: PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD)
     try:
@@ -166,26 +95,80 @@ def main():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station_carb ON carburants(station_id, carburant)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_station ON services(station_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_date ON services(date_import)")
-        # Dédup avant d'imposer l'unicité (évite crash si doublons historiques)
         cur.execute("""
-            WITH ranked AS (
-              SELECT ctid,
-                     ROW_NUMBER() OVER (
-                       PARTITION BY station_id, service
-                       ORDER BY date_import DESC NULLS LAST, ctid DESC
-                     ) AS rn
-              FROM services
-            )
-            DELETE FROM services
-            WHERE ctid IN (SELECT ctid FROM ranked WHERE rn > 1)
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_carburants_station_fuel_day
+            ON carburants(station_id, carburant, (COALESCE(date_maj, date_import)::date))
         """)
-        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_services_station_service ON services(station_id, service)")
+        print("Index carburants créé")
 
-        # Purge du jour en bloc pour éviter les DELETE/INSERT répétitifs et garder un import par jour
-        cur.execute(
-            "DELETE FROM carburants WHERE date_import >= %s AND date_import < %s",
-            (day_start, day_end)
-        )
+        # --- Parsing XML
+        tree = ET.parse(str(XML_PATH))
+        root = tree.getroot()
+
+        stations = []
+        station_rows = []
+        carburant_rows = []
+        carburant_current_rows = []
+        service_rows = []
+        missing_maj = 0
+        for pdv in root.findall("pdv"):
+            station = {
+                "id": int(pdv.get("id")),
+                "code_postal": pdv.get("cp"),
+                "latitude": float(pdv.get("latitude")) / 100000,
+                "longitude": float(pdv.get("longitude")) / 100000,
+                "ville": (pdv.findtext("ville", default="") or "").strip(),
+                "adresse": _clean(pdv.findtext("adresse", default="")),
+                "automate": False,
+                "services": [],
+                "carburants": {},
+            }
+
+            horaires = pdv.find("horaires")
+            if horaires is not None:
+                station["automate"] = (horaires.get("automate-24-24") == "1")
+
+            station["services"] = [
+                s.text.strip() for s in pdv.findall("services/service") if s.text
+            ]
+
+            for prix in pdv.findall("prix"):
+                nom = prix.get("nom")
+                val = prix.get("valeur")
+                if nom and val:
+                    maj_dt = None
+                    maj_str = prix.get("maj")
+                    if maj_str:
+                        try:
+                            maj_dt = datetime.strptime(maj_str, "%Y-%m-%d %H:%M:%S")
+                        except ValueError:
+                            maj_dt = None
+                    if maj_dt is None:
+                        missing_maj += 1
+                    station["carburants"][nom] = {"price": float(val.replace(",", ".")), "maj": maj_dt}
+
+            stations.append(station)
+            station_rows.append(
+                (
+                    station["id"],
+                    station["ville"],
+                    station["code_postal"],
+                    station["adresse"],
+                    station["latitude"],
+                    station["longitude"],
+                    int(station["automate"]),
+                )
+            )
+            for carb, info in station["carburants"].items():
+                maj_dt = info.get("maj") or now_naive
+                carburant_rows.append((station["id"], carb, info["price"], now_naive, maj_dt))
+                prix_milli = int(round(info["price"] * 1000))
+                carburant_current_rows.append((station["id"], carb, prix_milli, maj_dt))
+            for svc in station["services"]:
+                service_rows.append((station["id"], svc, now_naive))
+
+        print(f"[parse] Stations parsées: {len(stations)}")
+        print(f"[parse] Carburants sans date_maj fiable: {missing_maj}")
 
         # --- Upsert stations + dédup au jour pour carburants/services
         if station_rows:
@@ -209,10 +192,18 @@ def main():
         if carburant_rows:
             execute_values(
                 cur,
-                "INSERT INTO carburants (station_id, carburant, prix, date_import, date_maj) VALUES %s",
+                """
+                INSERT INTO carburants (station_id, carburant, prix, date_import, date_maj) VALUES %s
+                ON CONFLICT (station_id, carburant, (COALESCE(date_maj, date_import)::date)) DO UPDATE SET
+                  prix = EXCLUDED.prix,
+                  date_maj = EXCLUDED.date_maj,
+                  date_import = EXCLUDED.date_import
+                WHERE EXCLUDED.date_maj >= carburants.date_maj OR carburants.date_maj IS NULL
+                """,
                 carburant_rows,
                 page_size=5000,
             )
+            print(f"{len(carburant_rows)} carburants insérés")
 
         if carburant_current_rows:
             execute_values(
@@ -231,14 +222,11 @@ def main():
         if service_rows:
             execute_values(
                 cur,
-                """
-                INSERT INTO services (station_id, service, date_import) VALUES %s
-                ON CONFLICT (station_id, service) DO UPDATE SET
-                  date_import = EXCLUDED.date_import
-                """,
+                "INSERT INTO services (station_id, service, date_import) VALUES %s",
                 service_rows,
                 page_size=5000,
             )
+            print(f"{len(service_rows)} services insérés")
 
         # --- Métriques de fin d'import
         cur.execute("""
@@ -256,12 +244,14 @@ def main():
         cur.execute("SELECT COUNT(*) FROM carburants")
         total_carburants = cur.fetchone()[0] or 0
         if total_carburants <= 1_000_000:
+            print("Purge 30j lancée")
             cur.execute("""
                 DELETE FROM carburants
                 WHERE COALESCE(date_maj, date_import) < NOW() - INTERVAL '30 days'
             """)
             print(f"[parse] Purge carburants 30j OK (total avant={total_carburants})")
         else:
+            print("Purge 30j skippée")
             print(
                 f"[parse] Purge carburants SKIP (total={total_carburants} > 1_000_000). "
                 "Utilise une purge progressive par batch."
@@ -269,9 +259,9 @@ def main():
 
         conn.commit()
         conn.close()
-        print("[parse] OK: mise en base terminée (dédup jour), logs ci-dessus.")
+        print("[parse] OK: mise en base terminée, logs ci-dessus.")
     except Exception as e:
-        print(f"[parse] ERREUR BDD: {e}")
+        print(f"[parse] ERREUR: {e}")
         raise
 
 if __name__ == "__main__":
