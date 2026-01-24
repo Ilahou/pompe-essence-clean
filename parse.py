@@ -95,6 +95,7 @@ def main():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station_carb ON carburants(station_id, carburant)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_station ON services(station_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_date ON services(date_import)")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_services_station_service ON services(station_id, service)")
         # Dédup carburants avant création d'index unique (évite crash si doublons historiques)
         print("Vérification doublons carburants...")
         cur.execute("""
@@ -239,7 +240,11 @@ def main():
         if service_rows:
             execute_values(
                 cur,
-                "INSERT INTO services (station_id, service, date_import) VALUES %s",
+                """
+                INSERT INTO services (station_id, service, date_import) VALUES %s
+                ON CONFLICT (station_id, service) DO UPDATE SET
+                  date_import = EXCLUDED.date_import
+                """,
                 service_rows,
                 page_size=5000,
             )
