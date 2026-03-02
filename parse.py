@@ -85,9 +85,11 @@ def main():
               carburant  TEXT NOT NULL,
               prix_milli INTEGER NOT NULL,
               ts TIMESTAMP NOT NULL,
+              updated_at TIMESTAMP,
               PRIMARY KEY (station_id, carburant)
             )
         """)
+        cur.execute("ALTER TABLE carburant_current ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
 
         # Index utiles (idempotents)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station ON carburants(station_id)")
@@ -181,7 +183,7 @@ def main():
                 maj_dt = info.get("maj") or now_naive
                 carburant_rows.append((station["id"], carb, info["price"], now_naive, maj_dt))
                 prix_milli = int(round(info["price"] * 1000))
-                carburant_current_rows.append((station["id"], carb, prix_milli, maj_dt))
+                carburant_current_rows.append((station["id"], carb, prix_milli, now_naive, maj_dt))
             for svc in station["services"]:
                 service_rows.append((station["id"], svc, now_naive))
 
@@ -227,11 +229,14 @@ def main():
             execute_values(
                 cur,
                 """
-                INSERT INTO carburant_current (station_id, carburant, prix_milli, ts) VALUES %s
+                INSERT INTO carburant_current (station_id, carburant, prix_milli, ts, updated_at) VALUES %s
                 ON CONFLICT (station_id, carburant) DO UPDATE SET
                   prix_milli = EXCLUDED.prix_milli,
-                  ts = EXCLUDED.ts
-                WHERE EXCLUDED.ts >= carburant_current.ts
+                  ts = EXCLUDED.ts,
+                  updated_at = EXCLUDED.updated_at
+                WHERE
+                  carburant_current.updated_at IS NULL
+                  OR EXCLUDED.updated_at >= carburant_current.updated_at
                 """,
                 carburant_current_rows,
                 page_size=5000,
