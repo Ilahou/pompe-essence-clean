@@ -4,7 +4,7 @@ import psycopg2
 from psycopg2.extras import execute_batch, execute_values
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 def _clean(txt: str) -> str:
@@ -292,31 +292,41 @@ def main():
             print(f"{len(service_rows)} services insert tentés")
 
         # --- Métriques de fin d'import
-        cur.execute("""
-            SELECT
-              CURRENT_DATE                                  AS today,
-              MAX(date_import)                               AS last_import_ts,
-              COUNT(*) FILTER (WHERE date_import::date=CURRENT_DATE) AS rows_today,
-              COUNT(DISTINCT station_id) FILTER (WHERE date_import::date=CURRENT_DATE) AS stations_today
-            FROM carburants
-        """)
-        today_row = cur.fetchone()
+        imported_station_count = len({row[0] for row in carburant_rows})
+        today_row = (
+            now_naive.date(),
+            now_naive,
+            len(carburant_rows),
+            imported_station_count,
+        )
         print(f"[parse] Contrôle carburants: {today_row}")
 
         # Purge courte durée: 30 jours max, mais seulement si la table n'est pas trop grosse
-        cur.execute("SELECT COUNT(*) FROM carburants")
-        total_carburants = cur.fetchone()[0] or 0
-        if enable_inline_retention_purge and total_carburants <= 1_000_000:
+        if enable_inline_retention_purge:
+            retention_cutoff = now_naive - timedelta(days=30)
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM carburants
+                WHERE COALESCE(date_maj, date_import) < %s
+                """,
+                (retention_cutoff,),
+            )
+            purge_candidates = cur.fetchone()[0] or 0
+        else:
+            purge_candidates = 0
+
+        if enable_inline_retention_purge and purge_candidates <= 1_000_000:
             print("Purge 30j lancée")
             cur.execute("""
                 DELETE FROM carburants
                 WHERE COALESCE(date_maj, date_import) < NOW() - INTERVAL '30 days'
             """)
-            print(f"[parse] Purge carburants 30j OK (total avant={total_carburants})")
+            print(f"[parse] Purge carburants 30j OK (candidats avant={purge_candidates})")
         elif enable_inline_retention_purge:
             print("Purge 30j skippée")
             print(
-                f"[parse] Purge carburants SKIP (total={total_carburants} > 1_000_000). "
+                f"[parse] Purge carburants SKIP (candidats={purge_candidates} > 1_000_000). "
                 "Utilise une purge progressive par batch."
             )
         else:
