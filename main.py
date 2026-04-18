@@ -11,19 +11,24 @@ import parse        # parse + upsert en base
 import enrich_brands
 
 def assert_recent_import():
-    """Échoue le job si on n'a pas d'import carburants aujourd'hui (détecte les faux positifs)."""
+    """Échoue le job si on n'a pas d'import courant aujourd'hui (détecte les faux positifs)."""
     import psycopg2
     conn = enrich_brands.get_db_conn()
+    history_enabled = str(os.getenv("ENABLE_CARBURANTS_HISTORY") or "").strip().lower() in {"1", "true", "yes", "on"}
     with conn.cursor() as cur:
-        cur.execute("SELECT MAX(date_import) FROM carburants")
+        if history_enabled:
+            cur.execute("SELECT MAX(date_import) FROM carburants")
+        else:
+            cur.execute("SELECT MAX(ts) FROM carburant_current")
         mx = cur.fetchone()[0]
     conn.close()
     if not mx or mx.date() < date.today():
         raise SystemExit(
-            f"[main] ÉCHEC: pas de lignes carburants datées aujourd'hui (max={mx}). "
+            f"[main] ÉCHEC: pas de lignes carburants courantes datées aujourd'hui (max={mx}). "
             "Vérifie getxml/parse/logs."
         )
-    print(f"[main] OK: max(date_import) = {mx}")
+    source = "carburants.date_import" if history_enabled else "carburant_current.ts"
+    print(f"[main] OK: max({source}) = {mx}")
 
 def print_env_debug():
     print(f"[main] CWD: {Path.cwd()}")

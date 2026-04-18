@@ -41,10 +41,12 @@ def main():
     print("Début parsing...")
     now_utc = datetime.now(timezone.utc)
     now_naive = now_utc.replace(tzinfo=None)
+    enable_carburants_history = _env_flag("ENABLE_CARBURANTS_HISTORY", default=False)
     enable_carburants_dedup = _env_flag("ENABLE_CARBURANTS_DEDUP", default=False)
     enable_inline_retention_purge = _env_flag("ENABLE_INLINE_RETENTION_PURGE", default=False)
     print(
         "[parse] maintenance flags:",
+        f"history={enable_carburants_history}",
         f"dedup={enable_carburants_dedup}",
         f"inline_purge={enable_inline_retention_purge}",
     )
@@ -96,16 +98,6 @@ def main():
         cur.execute("ALTER TABLE stations ADD COLUMN IF NOT EXISTS adresse TEXT")
 
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS carburants (
-              station_id INTEGER REFERENCES stations(id),
-              carburant  TEXT,
-              prix       DOUBLE PRECISION,
-              date_import TIMESTAMP,
-              date_maj   TIMESTAMP
-            )
-        """)
-        cur.execute("ALTER TABLE carburants ADD COLUMN IF NOT EXISTS date_maj TIMESTAMP")
-        cur.execute("""
             CREATE TABLE IF NOT EXISTS services (
               station_id INTEGER REFERENCES stations(id),
               service    TEXT,
@@ -125,21 +117,35 @@ def main():
         cur.execute("ALTER TABLE carburant_current ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
 
         # Index utiles (idempotents)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station ON carburants(station_id)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_date ON carburants(date_import)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station_carb ON carburants(station_id, carburant)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_station ON services(station_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_date ON services(date_import)")
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_services_station_service ON services(station_id, service)")
-        if enable_carburants_dedup:
-            _run_carburants_dedup(cur)
+
+        if enable_carburants_history:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS carburants (
+                  station_id INTEGER REFERENCES stations(id),
+                  carburant  TEXT,
+                  prix       DOUBLE PRECISION,
+                  date_import TIMESTAMP,
+                  date_maj   TIMESTAMP
+                )
+            """)
+            cur.execute("ALTER TABLE carburants ADD COLUMN IF NOT EXISTS date_maj TIMESTAMP")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station ON carburants(station_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_date ON carburants(date_import)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_carburants_station_carb ON carburants(station_id, carburant)")
+            if enable_carburants_dedup:
+                _run_carburants_dedup(cur)
+            else:
+                print("[parse] Skip dédup globale carburants dans l'import quotidien.")
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_carburants_station_fuel_day
+                ON carburants(station_id, carburant, (COALESCE(date_maj, date_import)::date))
+            """)
+            print("Index carburants créé")
         else:
-            print("[parse] Skip dédup globale carburants dans l'import quotidien.")
-        cur.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_carburants_station_fuel_day
-            ON carburants(station_id, carburant, (COALESCE(date_maj, date_import)::date))
-        """)
-        print("Index carburants créé")
+            print("[parse] Historique carburants désactivé pour la base principale.")
 
         # --- Parsing XML
         tree = ET.parse(str(XML_PATH))
@@ -201,7 +207,8 @@ def main():
             )
             for carb, info in station["carburants"].items():
                 maj_dt = info.get("maj") or now_naive
-                carburant_rows.append((station["id"], carb, info["price"], now_naive, maj_dt))
+                if enable_carburants_history:
+                    carburant_rows.append((station["id"], carb, info["price"], now_naive, maj_dt))
                 prix_milli = int(round(info["price"] * 1000))
                 carburant_current_rows.append((station["id"], carb, prix_milli, now_naive, maj_dt))
             for svc in station["services"]:
@@ -236,7 +243,7 @@ def main():
                 page_size=500,
             )
 
-        if carburant_rows:
+        if enable_carburants_history and carburant_rows:
             execute_values(
                 cur,
                 """
@@ -257,6 +264,8 @@ def main():
                 page_size=5000,
             )
             print(f"{len(carburant_rows)} carburants upsert tentés")
+        elif not enable_carburants_history:
+            print("[parse] Skip écriture historique carburants.")
 
         if carburant_current_rows:
             execute_values(
@@ -292,17 +301,17 @@ def main():
             print(f"{len(service_rows)} services insert tentés")
 
         # --- Métriques de fin d'import
-        imported_station_count = len({row[0] for row in carburant_rows})
+        imported_station_count = len({row[0] for row in carburant_current_rows})
         today_row = (
             now_naive.date(),
             now_naive,
-            len(carburant_rows),
+            len(carburant_current_rows),
             imported_station_count,
         )
         print(f"[parse] Contrôle carburants: {today_row}")
 
         # Purge courte durée: 30 jours max, mais seulement si la table n'est pas trop grosse
-        if enable_inline_retention_purge:
+        if enable_carburants_history and enable_inline_retention_purge:
             retention_cutoff = now_naive - timedelta(days=30)
             cur.execute(
                 """
@@ -316,19 +325,21 @@ def main():
         else:
             purge_candidates = 0
 
-        if enable_inline_retention_purge and purge_candidates <= 1_000_000:
+        if enable_carburants_history and enable_inline_retention_purge and purge_candidates <= 1_000_000:
             print("Purge 30j lancée")
             cur.execute("""
                 DELETE FROM carburants
                 WHERE COALESCE(date_maj, date_import) < NOW() - INTERVAL '30 days'
             """)
             print(f"[parse] Purge carburants 30j OK (candidats avant={purge_candidates})")
-        elif enable_inline_retention_purge:
+        elif enable_carburants_history and enable_inline_retention_purge:
             print("Purge 30j skippée")
             print(
                 f"[parse] Purge carburants SKIP (candidats={purge_candidates} > 1_000_000). "
                 "Utilise une purge progressive par batch."
             )
+        elif not enable_carburants_history:
+            print("[parse] Aucune maintenance historique: table carburants hors chemin principal.")
         else:
             print("[parse] Skip purge 30j inline dans l'import quotidien.")
             print("[parse] Maintenance conseillée: lancer purge_carburants_batch.py hors import.")
