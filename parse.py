@@ -11,10 +11,43 @@ def _clean(txt: str) -> str:
     # Nettoie basiquement les textes XML pour éliminer les espaces multiples.
     return re.sub(r'\s+', ' ', (txt or '').strip())
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+def _run_carburants_dedup(cur):
+    print("[parse] Maintenance: dédup globale carburants…")
+    cur.execute("""
+        WITH ranked AS (
+          SELECT ctid,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY station_id, carburant, (COALESCE(date_maj, date_import)::date)
+                   ORDER BY date_maj DESC NULLS LAST, date_import DESC, ctid DESC
+                 ) AS rn
+          FROM carburants
+        )
+        DELETE FROM carburants
+        WHERE ctid IN (SELECT ctid FROM ranked WHERE rn > 1)
+    """)
+    deleted = cur.rowcount
+    if deleted > 0:
+        print(f"[parse] Doublons carburants supprimés: {deleted}")
+    else:
+        print("[parse] Aucun doublon carburants à supprimer.")
+
 def main():
     print("Début parsing...")
     now_utc = datetime.now(timezone.utc)
     now_naive = now_utc.replace(tzinfo=None)
+    enable_carburants_dedup = _env_flag("ENABLE_CARBURANTS_DEDUP", default=False)
+    enable_inline_retention_purge = _env_flag("ENABLE_INLINE_RETENTION_PURGE", default=False)
+    print(
+        "[parse] maintenance flags:",
+        f"dedup={enable_carburants_dedup}",
+        f"inline_purge={enable_inline_retention_purge}",
+    )
 
     # --- Résolution de chemin robuste (cron-proof)
     BASE_DIR = Path(__file__).resolve().parent
@@ -98,23 +131,10 @@ def main():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_station ON services(station_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_services_date ON services(date_import)")
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_services_station_service ON services(station_id, service)")
-        # Dédup carburants avant création d'index unique (évite crash si doublons historiques)
-        print("Vérification doublons carburants...")
-        cur.execute("""
-            WITH ranked AS (
-              SELECT ctid,
-                     ROW_NUMBER() OVER (
-                       PARTITION BY station_id, carburant, (COALESCE(date_maj, date_import)::date)
-                       ORDER BY date_maj DESC NULLS LAST, date_import DESC, ctid DESC
-                     ) AS rn
-              FROM carburants
-            )
-            DELETE FROM carburants
-            WHERE ctid IN (SELECT ctid FROM ranked WHERE rn > 1)
-        """)
-        deleted = cur.rowcount
-        if deleted > 0:
-            print(f"Doublons carburants supprimés: {deleted}")
+        if enable_carburants_dedup:
+            _run_carburants_dedup(cur)
+        else:
+            print("[parse] Skip dédup globale carburants dans l'import quotidien.")
         cur.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_carburants_station_fuel_day
             ON carburants(station_id, carburant, (COALESCE(date_maj, date_import)::date))
@@ -204,6 +224,13 @@ def main():
                   latitude = EXCLUDED.latitude,
                   longitude = EXCLUDED.longitude,
                   automate = EXCLUDED.automate
+                WHERE
+                  stations.ville IS DISTINCT FROM EXCLUDED.ville
+                  OR stations.code_postal IS DISTINCT FROM EXCLUDED.code_postal
+                  OR stations.adresse IS DISTINCT FROM EXCLUDED.adresse
+                  OR stations.latitude IS DISTINCT FROM EXCLUDED.latitude
+                  OR stations.longitude IS DISTINCT FROM EXCLUDED.longitude
+                  OR stations.automate IS DISTINCT FROM EXCLUDED.automate
                 """,
                 station_rows,
                 page_size=500,
@@ -218,12 +245,18 @@ def main():
                   prix = EXCLUDED.prix,
                   date_maj = EXCLUDED.date_maj,
                   date_import = EXCLUDED.date_import
-                WHERE EXCLUDED.date_maj >= carburants.date_maj OR carburants.date_maj IS NULL
+                WHERE
+                  carburants.date_maj IS NULL
+                  OR EXCLUDED.date_maj > carburants.date_maj
+                  OR (
+                    EXCLUDED.date_maj = carburants.date_maj
+                    AND carburants.prix IS DISTINCT FROM EXCLUDED.prix
+                  )
                 """,
                 carburant_rows,
                 page_size=5000,
             )
-            print(f"{len(carburant_rows)} carburants insérés")
+            print(f"{len(carburant_rows)} carburants upsert tentés")
 
         if carburant_current_rows:
             execute_values(
@@ -236,7 +269,11 @@ def main():
                   updated_at = EXCLUDED.updated_at
                 WHERE
                   carburant_current.updated_at IS NULL
-                  OR EXCLUDED.updated_at >= carburant_current.updated_at
+                  OR EXCLUDED.updated_at > carburant_current.updated_at
+                  OR (
+                    EXCLUDED.updated_at = carburant_current.updated_at
+                    AND carburant_current.prix_milli IS DISTINCT FROM EXCLUDED.prix_milli
+                  )
                 """,
                 carburant_current_rows,
                 page_size=5000,
@@ -247,13 +284,12 @@ def main():
                 cur,
                 """
                 INSERT INTO services (station_id, service, date_import) VALUES %s
-                ON CONFLICT (station_id, service) DO UPDATE SET
-                  date_import = EXCLUDED.date_import
+                ON CONFLICT (station_id, service) DO NOTHING
                 """,
                 service_rows,
                 page_size=5000,
             )
-            print(f"{len(service_rows)} services insérés")
+            print(f"{len(service_rows)} services insert tentés")
 
         # --- Métriques de fin d'import
         cur.execute("""
@@ -270,19 +306,22 @@ def main():
         # Purge courte durée: 30 jours max, mais seulement si la table n'est pas trop grosse
         cur.execute("SELECT COUNT(*) FROM carburants")
         total_carburants = cur.fetchone()[0] or 0
-        if total_carburants <= 1_000_000:
+        if enable_inline_retention_purge and total_carburants <= 1_000_000:
             print("Purge 30j lancée")
             cur.execute("""
                 DELETE FROM carburants
                 WHERE COALESCE(date_maj, date_import) < NOW() - INTERVAL '30 days'
             """)
             print(f"[parse] Purge carburants 30j OK (total avant={total_carburants})")
-        else:
+        elif enable_inline_retention_purge:
             print("Purge 30j skippée")
             print(
                 f"[parse] Purge carburants SKIP (total={total_carburants} > 1_000_000). "
                 "Utilise une purge progressive par batch."
             )
+        else:
+            print("[parse] Skip purge 30j inline dans l'import quotidien.")
+            print("[parse] Maintenance conseillée: lancer purge_carburants_batch.py hors import.")
 
         conn.commit()
         conn.close()
